@@ -17,6 +17,8 @@ Due to resource limitations it gets hard to train beyond that (although future t
 
 This is actually an expected result, as DeepSeek, in their R1 paper, has already shown that a rule-based reward model along with their GRPO training schema doesn't make any noticable difference. However there are a few next steps that I want to take to see if I am able to improve such a small model.
 
+The model is rewarded for correct format: putting its thinking in <think> </think> and its answer in <answer> </answer> as well as following the instruction-tuned format. The model is also rewarded for having intermediary numbers necessary for the calculation of the final answer in its thinking. Finally, it's rewarded for having a correct answer. 
+
 # Next Steps
 ### Add per-token rewards
 For efficiency, I used an outcome-based reward model. This reward was applied to tokens for a single output. This is likely making it much harder for reinforcement techniques to learn. Instead, I want to transition to a process-based reward model which can provide a reward for each token. This will probably incorporate the reasoning provided by the GSM8K and MATH dataset.
