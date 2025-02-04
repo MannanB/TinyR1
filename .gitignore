@@ -1,0 +1,9 @@
+*.pyc
+__pycache__
+ppo_*
+ppo2_*
+simple_*
+MATH
+GMS8K
+grpo_*
+debug.txt
