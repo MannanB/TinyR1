@@ -29,7 +29,7 @@ model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
 # --- SETUP DATA, OPTIMIZER, AND SCHEDULER ---
-train_dataset = MathDataset(tokenizer, "./GMS8K/train.jsonl", "./MATH/train")
+train_dataset = MathDataset(tokenizer, "./GSM8K/train.jsonl", "./MATH/train")
 train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
 optim = AdamW(model.parameters(), lr=1e-5)
 

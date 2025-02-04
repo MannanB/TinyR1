@@ -12,7 +12,7 @@ tokenizer = AutoTokenizer.from_pretrained(checkpoint)
 model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
 
 
-train_dataset = MathDataset(tokenizer, "./GMS8K/train.jsonl", "./MATH/train")
+train_dataset = MathDataset(tokenizer, "./GSM8K/train.jsonl", "./MATH/train")
 train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
 optim = AdamW(model.parameters(), lr=1e-5)
 

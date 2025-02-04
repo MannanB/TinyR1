@@ -4,7 +4,7 @@ import os
 
 import torch
 
-class GMS8K:
+class GSM8K:
     def __init__(self, path):
         self.path = path
 
@@ -69,21 +69,15 @@ class MATH:
         return len(self.jsonl)
     
 
-# gms8k = GMS8K("./GMS8K/train.jsonl")
-# math = MATH("./MATH/train")
-# print(f"Total length: {len(gms8k) + len(math)}(GMS8K: {len(gms8k)}, MATH: {len(math)})")
-# gms8k_data = gms8k.process()
-# math_data = math.process()
-# print(math_data)
 THINK_PROMPT = """You will be asked a math question. You first think about the reasing process and the steps to solve the problem and then provide the user with an answer.
 The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think> <answer> answer here </answer>
 Question: {question}
 """
 
 class MathDataset(torch.utils.data.Dataset):
-    def __init__(self, tokenizer, gms8k_path, math_path):
+    def __init__(self, tokenizer, gsm8k_path, math_path):
 
-        self.gms8k = GMS8K(gms8k_path).process()
+        self.gms8k = GSM8K(gsm8k_path).process()
         self.math = MATH(math_path).process()
 
         self.all_data = self.gms8k + self.math

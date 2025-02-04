@@ -3,7 +3,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from utils import decode_single_logit, decode_entire_logits
 from dataset import GMS8K, MATH
 
-# gms8k = GMS8K("./GMS8K/test.jsonl")
+# gms8k = GSM8K("./GSM8K/test.jsonl")
 # data = gms8k.process()
 math = MATH("./MATH/test")
 data = math.process()

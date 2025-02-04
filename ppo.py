@@ -55,7 +55,7 @@ class ValueHead(nn.Module):
 
 value_head = ValueHead(model.config.hidden_size).to(device).to(torch.bfloat16) 
 
-train_dataset = MathDataset(tokenizer, "./GMS8K/train.jsonl", "./MATH/train")
+train_dataset = MathDataset(tokenizer, "./GSM8K/train.jsonl", "./MATH/train")
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
 # Set up optimizer and scheduler.
