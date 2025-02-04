@@ -12,8 +12,7 @@ n = 10
 parent_checkpoint = "HuggingFaceTB/SmolLM2-360M-Instruct"
 checkpoint = "HuggingFaceTB/SmolLM2-360M-Instruct"
 device = "cuda"
-A = "HuggingFaceTB/SmolLM2-360M-Instruct"
-B = "./grpo_checkpoint"
+
 
 tokenizer = AutoTokenizer.from_pretrained(parent_checkpoint)
 
@@ -23,7 +22,7 @@ for checkpoint in ["./grpo_checkpoint", "HuggingFaceTB/SmolLM2-360M-Instruct", "
 
     model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
 
-    for i in range(20, 20+n):
+    for i in range(n):
         question = data[i]["question"]
 
         THINK_PROMPT = f"""You will be asked a math question. You first think about the reasing process and the steps to solve the problem and then provide the user with an answer.

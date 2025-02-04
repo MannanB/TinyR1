@@ -50,6 +50,4 @@ for epoch in range(num_epochs):
         if bi % 100 == 0:
             model.save_pretrained(f"simple_ft_checkpoint{int(bi / 100)}/")
 
-
-
         bi += 1

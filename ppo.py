@@ -4,17 +4,16 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer, AdamW, get_scheduler
 from torch.utils.data import DataLoader
 from dataset import MathDataset
-import re
 import numpy as np
-import tqdm
+import tqdm, time
 import copy
 
 from utils import reward_model
 
 from peft import LoraConfig, get_peft_model, TaskType
 
+# NOTE: This PPO implementation is INCOMPLETE as KL-divergence is not implemented.
 
-# Hyperparameters
 LR = 1e-5
 MAX_NEW_TOKENS = 1024
 GAMMA = 0.99
@@ -23,33 +22,30 @@ EPS_CLIP = 0.1
 VALUE_COEF = 0.5
 ENTROPY_COEF = 0.01
 NUM_EPOCHS = 1
-SIM_BATCH_SIZE = 4
+BATCH_SIZE = 12  # overall batch size
+ACCUM_MINI_BATCH_SIZE = 4  # mini batch size for teacher-forcing gradient accumulation
 
 checkpoint = "HuggingFaceTB/SmolLM2-360M-Instruct"
 device = "cuda"
 
 tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
+model = AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype=torch.bfloat16, device_map="auto").to(device)
 
 lora_config = LoraConfig(
     task_type=TaskType.CAUSAL_LM,   # Specify the task type
-    r=32,                           # Rank of the decomposition matrix
-    lora_alpha=64,                 # Scaling factor
+    r=64,                           # Rank of the decomposition matrix
+    lora_alpha=128,                  # Scaling factor
     lora_dropout=0.05,              # Dropout probability for LoRA layers
-    target_modules=["q_proj", "v_proj", "up_proj", "down_proj"]  # List of module names to inject LoRA adapters (adjust as needed)
+    target_modules=["q_proj", "v_proj", "up_proj", "down_proj"]
 )
-
-# Wrap the original model with the LoRA adapter
+# Wrap the original model with the LoRA adapter.
 model = get_peft_model(model, lora_config)
-# Optional: print trainable parameters to verify only LoRA parameters are being optimized
 model.print_trainable_parameters()
 
+# Enable output of hidden states so we can compute value estimates.
+model.config.output_hidden_states = True
 
-model.config.output_hidden_states = True  # so we can compute value estimates
 
-
-
-# A simple value head that maps last hidden states to a scalar value per token.
 class ValueHead(nn.Module):
     def __init__(self, hidden_size):
         super().__init__()
@@ -57,18 +53,20 @@ class ValueHead(nn.Module):
     def forward(self, hidden_states):
         return self.linear(hidden_states).squeeze(-1)
 
-value_head = ValueHead(model.config.hidden_size).to(device)
+value_head = ValueHead(model.config.hidden_size).to(device).to(torch.bfloat16) 
 
 train_dataset = MathDataset(tokenizer, "./GMS8K/train.jsonl", "./MATH/train")
-train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+# Set up optimizer and scheduler.
 optim = AdamW(list(model.parameters()) + list(value_head.parameters()), lr=LR)
 num_training_steps = NUM_EPOCHS * len(train_loader)
-lr_scheduler = get_scheduler("linear", optimizer=optim, num_warmup_steps=16, num_training_steps=num_training_steps)
-
+lr_scheduler = get_scheduler("linear", optimizer=optim,
+                             num_warmup_steps=16, num_training_steps=num_training_steps)
 
 
 def compute_gae(rewards, values, gamma, lam):
-    # rewards and values: tensors of shape (T,) for one sequence; assume terminal state's value = 0.
+    # rewards and values are 1D tensors of length T (tokens for one sequence).
     T = rewards.size(0)
     advantages = torch.zeros_like(rewards)
     gae = 0
@@ -80,7 +78,6 @@ def compute_gae(rewards, values, gamma, lam):
     returns = advantages + values
     return advantages, returns
 
-# Create an "old" model copy for PPO KL calculations.
 old_model = copy.deepcopy(model)
 old_model.eval()
 old_model.to(device)
@@ -96,92 +93,106 @@ for epoch in range(NUM_EPOCHS):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         prompt_len = input_ids.size(1)
-
-        # Generate continuations.
+        
         with torch.no_grad():
             gen_sequences = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=MAX_NEW_TOKENS,
                 do_sample=True,
+                eos_token_id=tokenizer("<|im_end|>")["input_ids"][0]
             )
-        # Use only the generated part.
-        gen_part = gen_sequences[:, prompt_len:]
-        # Decode tokens to compute reward.
-        gen_tokens = [tokenizer.decode(x) for x in gen_part[0].tolist()]
+        # gen_sequences shape: (B, L_total)
+        gen_part = gen_sequences[:, prompt_len:]  # generated tokens only
 
-        reward_val = reward_model(gen_tokens, batch["correct_answer"][0], batch["reasoning"][0])
-        reward_tensor = torch.zeros((gen_part.size(0), gen_part.size(1)), device=device)
-        reward_tensor = reward_tensor + (reward_val / gen_part.size(1))  # reward only at final token
-
-        # Teacher-forcing pass on generated sequence.
-        attn = torch.ones_like(gen_sequences).to(device)
-        outputs_new = model(gen_sequences, attention_mask=attn, output_hidden_states=True, return_dict=True)
-        logits_new = outputs_new.logits  # (B, L, V)
-        hs_new = outputs_new.hidden_states[-1]  # (B, L, H)
-        new_log_probs = F.log_softmax(logits_new, dim=-1)
-        new_log_probs = new_log_probs[:, prompt_len:, :]  # (B, T, V)
-        # Gather log probs for actions.
-        gen_actions = gen_sequences[:, prompt_len:]
-        new_action_log_probs = new_log_probs.gather(2, gen_actions.unsqueeze(-1)).squeeze(-1)  # (B, T)
-        # Entropy.
-        entropy = -(new_log_probs * new_log_probs.exp()).sum(-1).mean()
-
-
-        with torch.no_grad():
-            outputs_old = old_model(gen_sequences, attention_mask=attn, output_hidden_states=True, return_dict=True)
-            logits_old = outputs_old.logits
-        old_log_probs = F.log_softmax(logits_old, dim=-1)[:, prompt_len:, :]
-        old_action_log_probs = old_log_probs.gather(2, gen_actions.unsqueeze(-1)).squeeze(-1)
-
-
-        # Value predictions.
-        values = value_head(hs_new)[:, prompt_len:]  # (B, T)
-
-        # Compute advantages & returns per sequence (looping over batch if needed).
-        advantages_list = []
-        returns_list = []
-        for i in range(values.size(0)):
-            adv, ret = compute_gae(reward_tensor[i], values[i], GAMMA, LAM)
-            advantages_list.append(adv)
-            returns_list.append(ret)
-        advantages = torch.stack(advantages_list, dim=0)
-        returns = torch.stack(returns_list, dim=0)
-
-        # PPO loss.
-        log_ratio = new_action_log_probs - old_action_log_probs
-        ratio = torch.exp(log_ratio)
-        surr1 = ratio * advantages
-        surr2 = torch.clamp(ratio, 1 - EPS_CLIP, 1 + EPS_CLIP) * advantages
-        policy_loss = -torch.min(surr1, surr2).mean()
-        value_loss = F.mse_loss(values, returns)
-        loss = policy_loss + VALUE_COEF * value_loss - ENTROPY_COEF * entropy
-
-        loss.backward()
-        if (bi + 1) % SIM_BATCH_SIZE == 0 or (bi + 1) == len(train_loader):
-            optim.step()
-            lr_scheduler.step()
-            optim.zero_grad()
-            model.save_pretrained("ppo2_checkpoint/")
+        reward_tensor = torch.zeros(gen_part.size(), device=device)
+        for i in range(input_ids.size(0)):
+            # Decode generated tokens for sample i.
+            gen_tokens = [tokenizer.decode([token_id]) for token_id in gen_part[i].tolist()]
+            reward_val = reward_model(gen_tokens, batch["correct_answer"][i], batch["reasoning"][i])
+            # Spread the reward evenly over all generated tokens.
+            reward_tensor[i] = reward_val / gen_part.size(1)
+        
+        loss_total = 0.0
+        B = gen_sequences.size(0) 
+        for start in range(0, B, ACCUM_MINI_BATCH_SIZE):
+            end = start + ACCUM_MINI_BATCH_SIZE
+            mini_gen_sequences = gen_sequences[start:end]  # (mini_B, L_total)
+            mini_attn = torch.ones_like(mini_gen_sequences).to(device)
+            
+            mini_outputs_new = model(
+                mini_gen_sequences,
+                attention_mask=mini_attn,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            mini_logits_new = mini_outputs_new.logits  # (mini_B, L_total, V)
+            mini_hs_new = mini_outputs_new.hidden_states[-1]  # (mini_B, L_total, H)
+            mini_new_log_probs = F.log_softmax(mini_logits_new, dim=-1)[:, prompt_len:, :]  # (mini_B, T, V)
+            mini_gen_actions = mini_gen_sequences[:, prompt_len:]  # (mini_B, T)
+            mini_new_action_log_probs = mini_new_log_probs.gather(2, mini_gen_actions.unsqueeze(-1)).squeeze(-1)
+            mini_entropy = -(mini_new_log_probs * mini_new_log_probs.exp()).sum(-1).mean()
+            
+            with torch.no_grad():
+                mini_outputs_old = old_model(
+                    mini_gen_sequences,
+                    attention_mask=mini_attn,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+            mini_logits_old = mini_outputs_old.logits
+            mini_old_log_probs = F.log_softmax(mini_logits_old, dim=-1)[:, prompt_len:, :]
+            mini_old_action_log_probs = mini_old_log_probs.gather(2, mini_gen_actions.unsqueeze(-1)).squeeze(-1)
+        
+            mini_values = value_head(mini_hs_new)[:, prompt_len:]  # (mini_B, T)
+            
+            # Compute GAE per mini sample
+            mini_advantages_list = []
+            mini_returns_list = []
+            for i in range(mini_values.size(0)):
+                adv, ret = compute_gae(reward_tensor[start + i], mini_values[i], GAMMA, LAM)
+                mini_advantages_list.append(adv)
+                mini_returns_list.append(ret)
+            mini_advantages = torch.stack(mini_advantages_list, dim=0)  # (mini_B, T)
+            mini_returns = torch.stack(mini_returns_list, dim=0)          # (mini_B, T)
+            
+            mini_log_ratio = mini_new_action_log_probs - mini_old_action_log_probs
+            mini_ratio = torch.exp(mini_log_ratio)
+            mini_surr1 = mini_ratio * mini_advantages
+            mini_surr2 = torch.clamp(mini_ratio, 1 - EPS_CLIP, 1 + EPS_CLIP) * mini_advantages
+            mini_policy_loss = -torch.min(mini_surr1, mini_surr2).mean()
+            mini_value_loss = F.mse_loss(mini_values, mini_returns)
+            mini_loss = mini_policy_loss + VALUE_COEF * mini_value_loss - ENTROPY_COEF * mini_entropy
+            
+            mini_loss.backward()
+            loss_total += mini_loss.item()
             torch.cuda.empty_cache()
-            with open("./debug.txt", "w", errors="ignore") as f:
-                f.write(tokenizer.decode(gen_sequences[0], skip_special_tokens=False) + "\n" + f"loss: {loss.item():.5f}, reward: {reward_val:.5f}, adv: {advantages.mean().item():.5f}, val: {value_loss.item():.5f}, ent: {entropy.item():.5f}")
 
+        optim.step()
+        lr_scheduler.step()
+        optim.zero_grad()
 
-        if (bi + 1) % SIM_BATCH_SIZE * 3 == 0 or (bi + 1) == len(train_loader):
-            old_model.load_state_dict(model.state_dict())
+        old_model.load_state_dict(model.state_dict())
 
-
-        if bi % 100 == 0:
-            model.save_pretrained(f"ppo2_checkpoint_{int(bi/100)}/")
+        model.save_pretrained("ppo2_checkpoint/")
+        with open("./debug.txt", "w", errors="ignore") as f:
+            debug_text = (
+                tokenizer.decode(gen_sequences[0], skip_special_tokens=False) + "\n" +
+                f"loss: {loss_total:.5f}, reward: {reward_tensor[0].mean().item():.5f}, " +
+                f"adv: {mini_advantages.mean().item():.5f}, value_loss: {mini_value_loss.item():.5f}, " +
+                f"entropy: {mini_entropy.item():.5f}"
+            )
+            f.write(debug_text)
 
         global_step += 1
         pbar.update(1)
-        pbar.set_description(f"loss: {loss.item():.5f}, reward: {reward_val:.5f}, adv: {advantages.mean().item():.5f}, val: {value_loss.item():.5f}, ent: {entropy.item():.5f}")
+        pbar.set_description(
+            f"loss: {loss_total:.5f}, reward: {reward_tensor[0].mean().item():.5f}, " +
+            f"adv: {mini_advantages.mean().item():.5f}, value_loss: {mini_value_loss.item():.5f}, " +
+            f"entropy: {mini_entropy.item():.5f}"
+        )
 
-
-
-        del input_ids, attention_mask, gen_sequences, outputs_new, outputs_old, logits_new, logits_old
+        del input_ids, attention_mask, gen_sequences, mini_outputs_new, mini_outputs_old
         torch.cuda.empty_cache()
 
 pbar.close()

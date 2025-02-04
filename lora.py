@@ -4,13 +4,11 @@ from dataset import MathDataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-# Import LoRA utilities from the peft library
 from peft import LoraConfig, get_peft_model, TaskType
 
 checkpoint = "HuggingFaceTB/SmolLM-135M-Instruct"
 device = "cuda"
 
-# Load tokenizer and model as usual
 tokenizer = AutoTokenizer.from_pretrained(checkpoint)
 model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
 model.train()
@@ -22,12 +20,12 @@ lora_config = LoraConfig(
     r=8,                           # Rank of the decomposition matrix
     lora_alpha=32,                 # Scaling factor
     lora_dropout=0.1,              # Dropout probability for LoRA layers
-    target_modules=["q_proj", "v_proj", "up_proj", "down_proj"]  # List of module names to inject LoRA adapters (adjust as needed)
+    target_modules=["q_proj", "v_proj", "up_proj", "down_proj"]  # List of module names to inject LoRA adapters
 )
 
 # Wrap the original model with the LoRA adapter
 model = get_peft_model(model, lora_config)
-# Optional: print trainable parameters to verify only LoRA parameters are being optimized
+
 model.print_trainable_parameters()
 
 # --- SETUP DATA, OPTIMIZER, AND SCHEDULER ---
@@ -54,11 +52,8 @@ for epoch in range(num_epochs):
         batch = {k: v.to(device) for k, v in batch.items()}
         # Forward pass with labels (for language modeling)
         outputs = model(**batch, labels=batch["input_ids"])
-        loss = outputs.loss  # You can also use outputs[0] if you prefer
+        loss = outputs.loss  
 
-
-
-        # Backward pass
         loss.backward()
 
         pbar.update(1)
