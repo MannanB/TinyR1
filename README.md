@@ -26,3 +26,6 @@ Currently, I am using a purely rule based model. While DeepSeek showed that this
 
 ### More Tokens, More Compute, More Parameters
 As always, throwing more data, more parameters and more processing power can improve a model.
+
+### Higher Rank LoRA / no LoRA
+In order to speed up training, I decided to add LoRA adapters. However, it isn't clear whether this is impeding on RL's ability, or if the rank is too low for the policy to learn what it needs to.
